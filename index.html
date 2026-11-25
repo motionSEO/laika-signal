@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>라이카 시그널 · 프로토타입</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
+<style>
+  html, body { margin: 0; height: 100%; background: #171717; overflow: hidden; }
+  body { font-family: 'Pretendard', system-ui, sans-serif; color: #fff; }
+  canvas { display: block; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 28px; text-align: center;
+    font-size: 13px; letter-spacing: 0.02em; color: rgba(255,255,255,0.42);
+    transition: opacity 1.2s ease; pointer-events: none;
+  }
+  #hint b { color: rgba(255,255,255,0.7); font-weight: 600; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
+<script type="importmap">
+{ "imports": {
+  "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hint">카드를 프레임 안에 비추고 송신기를 클릭 <b>Space</b> · 카메라 <b>C</b> · 직접 입력 <b>T</b> · 기록지 치우기 <b>Esc</b></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+/* =========================================================
+   1. 데이터 — 여기만 고치면 됩니다
+   ---------------------------------------------------------
+   FILM      : 영화 제목
+   DIALOGUES : 스포일러 없는 대사 후보와 감정 결(0~1).
+               [ ] 로 표시된 줄은 자리표시입니다.
+               공식 예고편 · 배급사 자료에서 고른 실제 대사로 바꿔 주세요.
+   EMOTIONS  : 관객의 기대 문장을 나누는 감정 결과 키워드.
+   ========================================================= */
+const FILM = '룩백';
+
+const DIALOGUES = [
+  { text: '그럼 후지노는 왜 만화를 그리는 거야?', tags: { 영감: 0.7, 용기: 0.2, 그리움: 0.1 } }, // 발표 자료의 대사 — 실제 자막과 대조 필요
+  { text: '[대사 후보 — 위로의 결]',   tags: { 위로: 0.8, 쉼: 0.2 } },
+  { text: '[대사 후보 — 쉼의 결]',     tags: { 쉼: 0.8, 위로: 0.2 } },
+  { text: '[대사 후보 — 설렘의 결]',   tags: { 설렘: 0.8, 용기: 0.2 } },
+  { text: '[대사 후보 — 용기의 결]',   tags: { 용기: 0.8, 영감: 0.2 } },
+  { text: '[대사 후보 — 그리움의 결]', tags: { 그리움: 0.8, 위로: 0.2 } },
+];
+
+const EMOTIONS = {
+  위로:   ['위로', '따뜻', '포근', '안아', '괜찮', '치유', '힐링', '다독', '눈물', '울고', '슬픔', '아픔', '상처', '달래'],
+  쉼:     ['휴식', '쉼', '쉬어', '쉬는', '조용', '잔잔', '편안', '평온', '느긋', '여유', '고요', '숨', '차분', '멍'],
+  설렘:   ['설렘', '설레', '두근', '기대', '신나', '즐거', '행복', '웃음', '재미', '반짝', '들뜬'],
+  용기:   ['용기', '힘', '응원', '다시', '시작', '도전', '꿈', '열정', '앞으로', '원동력', '나아', '버티'],
+  그리움: ['그리움', '그립', '추억', '기억', '어린', '친구', '옛', '학창', '향수', '시절', '그때', '보고싶'],
+  영감:   ['영감', '생각', '질문', '이유', '창작', '그림', '만화', '그리', '예술', '의미', '자극', '깨달'],
+};
+const EMO_KEYS = Object.keys(EMOTIONS);
+
+/* =========================================================
+   2. 분석 — 기대 문장 → 감정 결 퍼센티지 → 가장 가까운 대사
+   ========================================================= */
+function bigrams(s) { const a = []; for (let i = 0; i < s.length - 1; i++) a.push(s.slice(i, i + 2)); return a; }
+
+function analyze(text) {
+  const t = text.replace(/\s+/g, '');
+  const tb = new Set(bigrams(t));
+  const raw = {};
+  for (const k of EMO_KEYS) {
+    let s = 0;
+    for (const w of EMOTIONS[k]) {
+      if (t.includes(w)) { s += 1; continue; }
+      // 손글씨 인식이 조금 틀려도 잡히도록 글자쌍 겹침으로 부분 점수
+      const wb = bigrams(w);
+      if (wb.length) {
+        const hit = wb.filter(b => tb.has(b)).length / wb.length;
+        if (hit >= 0.5) s += 0.5 * hit;
+      }
+    }
+    raw[k] = s;
+  }
+  const total = Object.values(raw).reduce((a, b) => a + b, 0);
+  const pct = {};
+  for (const k of EMO_KEYS) pct[k] = total > 0 ? raw[k] / total : 1 / EMO_KEYS.length;
+  return { pct, weak: total === 0 };
+}
+
+function cosine(a, b) {
+  let d = 0, na = 0, nb = 0;
+  for (const k of EMO_KEYS) { const x = a[k] || 0, y = b[k] || 0; d += x * y; na += x * x; nb += y * y; }
+  return na && nb ? d / Math.sqrt(na * nb) : 0;
+}
+
+function pickDialogue(pct) {
+  let best = DIALOGUES[0], bestScore = -1;
+  for (const d of DIALOGUES) {
+    const s = cosine(pct, d.tags) + Math.random() * 0.02; // 비슷하면 살짝 섞이도록
+    if (s > bestScore) { bestScore = s; best = d; }
+  }
+  return { dialogue: best, match: Math.max(0, bestScore) };
+}
+
+function extractWish(text) {
+  const t = text.replace(/[^가-힣a-zA-Z0-9\s.,!?~'"“”]/g, ' ').replace(/\s+/g, ' ').trim();
+  const m = t.match(/나에게\s*(.+?)\s*(였으면|이었으면|이면|면)/);
+  return (m ? m[1] : t).slice(0, 40).trim();
+}
+
+/* 함께 기다린 사람들 — 이 브라우저에 쌓인 송신 기록으로 문장을 엮음 */
+const STORE = 'laika-signal-' + FILM;
+function loadHistory() { try { return JSON.parse(localStorage.getItem(STORE)) || { n: 0, sum: {} }; } catch { return { n: 0, sum: {} }; } }
+function saveHistory(h) { try { localStorage.setItem(STORE, JSON.stringify(h)); } catch {} }
+function hasJong(w) { const c = w.charCodeAt(w.length - 1) - 0xAC00; return c >= 0 && c % 28 !== 0; }
+function weave(sum) {
+  const top = EMO_KEYS.slice().sort((a, b) => (sum[b] || 0) - (sum[a] || 0)).slice(0, 3);
+  const parts = top.map((w, i) => i < top.length - 1 ? w + (hasJong(w) ? '과' : '와') : w + (hasJong(w) ? '을' : '를'));
+  return parts.join(', ') + ' 바랐어요.';
+}
+
+/* =========================================================
+   3. 장면 — three.js
+   ========================================================= */
+const BG = 0x171717, ORANGE = 0xff742f;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.localClippingEnabled = true;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(BG);
+const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.1, 100);
+camera.position.set(0, -0.4, 14);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.4));
+const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(3, 4, 6); scene.add(key);
+
+function outline(geo, scale = 1.025) {
+  const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xeeeeee, side: THREE.BackSide }));
+  m.scale.setScalar(scale); return m;
+}
+
+/* 송신기 */
+const tx = new THREE.Group(); scene.add(tx);
+const BODY_W = 2.6, BODY_H = 3.4, BODY_D = 1.4;
+const bodyGeo = new RoundedBoxGeometry(BODY_W, BODY_H, BODY_D, 6, 0.28);
+const body = new THREE.Mesh(bodyGeo, new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.6, metalness: 0.05 }));
+tx.add(body);
+
+const front = BODY_D / 2;
+function slot(w, y) {
+  const g = new RoundedBoxGeometry(w, 0.1, 0.06, 3, 0.04);
+  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x0d0d0d }));
+  m.position.set(0, y, front + 0.005);
+  const o = outline(g, 1.06); o.position.copy(m.position);
+  tx.add(o, m); return m;
+}
+const inSlot = slot(1.5, 1.2);
+const OUT_Y = -1.2;
+const outSlot = slot(1.8, OUT_Y);
+
+const lamp = new THREE.Mesh(new THREE.CircleGeometry(0.15, 48), new THREE.MeshBasicMaterial({ color: ORANGE }));
+lamp.position.set(0, 0.05, front + 0.01); tx.add(lamp);
+const lampGlow = new THREE.Mesh(new THREE.CircleGeometry(0.42, 48),
+  new THREE.MeshBasicMaterial({ color: ORANGE, transparent: true, opacity: 0, depthWrite: false }));
+lampGlow.position.set(0, 0.05, front + 0.005); tx.add(lampGlow);
+
+/* 기록지 */
+const PAPER_W = 1.6;
+let PAPER_H = 2.6; // 기록지 내용 길이에 맞춰 다시 계산됨
+const paperCanvas = document.createElement('canvas'); paperCanvas.width = 640; paperCanvas.height = 1768;
+const paperTex = new THREE.CanvasTexture(paperCanvas); paperTex.colorSpace = THREE.SRGBColorSpace;
+paperTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+const clip = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0); // 출력구 위는 잘라 냄
+const paper = new THREE.Mesh(new THREE.PlaneGeometry(PAPER_W, PAPER_H),
+  new THREE.MeshBasicMaterial({ map: paperTex, clippingPlanes: [clip], transparent: true }));
+paper.visible = false; tx.add(paper);
+
+/* 카메라 화면 */
+const VIEW_W = 3.6, VIEW_H = 2.7;
+const video = document.createElement('video'); video.playsInline = true; video.muted = true;
+const offCanvas = document.createElement('canvas'); offCanvas.width = 720; offCanvas.height = 540;
+const offTex = new THREE.CanvasTexture(offCanvas); offTex.colorSpace = THREE.SRGBColorSpace;
+const videoTex = new THREE.VideoTexture(video); videoTex.colorSpace = THREE.SRGBColorSpace;
+const view = new THREE.Group(); scene.add(view);
+const screenGeo = new THREE.PlaneGeometry(VIEW_W, VIEW_H);
+const screen = new THREE.Mesh(screenGeo, new THREE.MeshBasicMaterial({ map: offTex }));
+const frame = new THREE.LineSegments(new THREE.EdgesGeometry(screenGeo), new THREE.LineBasicMaterial({ color: 0xeeeeee }));
+view.add(screen, frame);
+
+// 카드 인식 영역(가운데 70%) 모서리 표시
+const GUIDE = 0.7;
+const guide = new THREE.Group(); view.add(guide);
+{
+  const gw = VIEW_W * GUIDE / 2, gh = VIEW_H * GUIDE / 2, L = 0.28;
+  const pts = [];
+  for (const [sx, sy] of [[-1, 1], [1, 1], [1, -1], [-1, -1]]) {
+    pts.push(sx * gw, sy * gh, 0.01, sx * (gw - L), sy * gh, 0.01);
+    pts.push(sx * gw, sy * gh, 0.01, sx * gw, sy * (gh - L), 0.01);
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  guide.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: ORANGE })));
+}
+const scan = new THREE.Mesh(new THREE.PlaneGeometry(VIEW_W, 0.03), new THREE.MeshBasicMaterial({ color: ORANGE, transparent: true, opacity: 0 }));
+scan.position.z = 0.02; view.add(scan);
+
+function drawOff() {
+  const c = offCanvas.getContext('2d');
+  c.fillStyle = '#1d1d1d'; c.fillRect(0, 0, 720, 540);
+  c.fillStyle = 'rgba(255,255,255,0.45)'; c.textAlign = 'center';
+  c.font = '500 30px Pretendard, sans-serif'; c.fillText('카메라 꺼짐', 360, 262);
+  c.font = '500 22px Pretendard, sans-serif'; c.fillText('클릭하거나 C 를 눌러 켜기', 360, 304);
+  offTex.needsUpdate = true;
+}
+
+/* 배치 */
+function layout() {
+  const aspect = innerWidth / innerHeight, wide = aspect > 1.15;
+  // 수신기: 화면 정중앙에 크게 / 카메라 화면: 작게 왼쪽 위
+  tx.scale.setScalar(1.35);
+  tx.position.set(0, 1.0, 0);
+  view.scale.setScalar(0.55);
+  camera.position.set(0, -0.9, wide ? 17 : 24);
+  const halfH = camera.position.z * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const halfW = halfH * aspect;
+  view.position.set(-halfW + 1.5, camera.position.y + halfH - 1.2, 0);
+}
+layout();
+
+/* =========================================================
+   4. 카메라 켜고 끄기
+   ========================================================= */
+let stream = null;
+async function cameraOn() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 960 } }, audio: false });
+    video.srcObject = stream; await video.play();
+    screen.material.map = videoTex; screen.material.needsUpdate = true;
+  } catch (e) {
+    stream = null; drawOff();
+    console.warn('카메라를 열 수 없습니다:', e);
+  }
+}
+function cameraOff() {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; video.srcObject = null;
+  screen.material.map = offTex; screen.material.needsUpdate = true;
+}
+function toggleCamera() { stream ? cameraOff() : cameraOn(); }
+
+/* =========================================================
+   5. 손글씨 인식 (Tesseract.js · 한국어)
+   ========================================================= */
+let workerPromise = null;
+function getWorker() {
+  if (!workerPromise) {
+    if (typeof Tesseract === 'undefined') return Promise.reject(new Error('Tesseract.js를 불러오지 못했습니다'));
+    workerPromise = Tesseract.createWorker('kor+eng');
+    workerPromise.catch(e => { console.warn('인식 엔진 준비 실패:', e); workerPromise = null; });
+  }
+  return workerPromise;
+}
+
+function grabFrame() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const cw = vw * GUIDE, ch = vh * GUIDE, sx = (vw - cw) / 2, sy = (vh - ch) / 2;
+  const scale = 1.6;
+  const c = document.createElement('canvas'); c.width = cw * scale; c.height = ch * scale;
+  const g = c.getContext('2d'); g.drawImage(video, sx, sy, cw, ch, 0, 0, c.width, c.height);
+  // 흑백 + 대비 강조 (손글씨 인식 보조)
+  const img = g.getImageData(0, 0, c.width, c.height), d = img.data;
+  let mean = 0;
+  for (let i = 0; i < d.length; i += 4) { const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; d[i] = y; mean += y; }
+  mean /= d.length / 4;
+  const th = mean * 0.82;
+  for (let i = 0; i < d.length; i += 4) { const v = d[i] < th ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = v; }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+/* =========================================================
+   6. 기록지 그리기
+   ========================================================= */
+function wrap(ctx, text, maxW) {
+  const lines = []; let line = '';
+  for (const ch of text) {
+    const test = line + ch;
+    if (ctx.measureText(test).width > maxW && line) {
+      const sp = line.lastIndexOf(' ');
+      if (sp > 0 && ch !== ' ') { lines.push(line.slice(0, sp)); line = line.slice(sp + 1) + ch; }
+      else { lines.push(line); line = ch === ' ' ? '' : ch; }
+    } else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+function drawReceipt({ no, wish, pct, dialogue, together, weak }) {
+  const c = paperCanvas.getContext('2d'), W = 640, H = 1768, P = 52;
+  c.clearRect(0, 0, W, H);
+  c.fillStyle = '#F2F2F2'; c.fillRect(0, 0, W, H);
+  c.fillStyle = '#171717'; c.textBaseline = 'top';
+  let y = 60;
+  const now = new Date(), pad = n => String(n).padStart(2, '0');
+
+  c.font = '600 30px Pretendard, sans-serif'; c.textAlign = 'left'; c.fillText('LAIKA CINEMA', P, y);
+  c.font = '500 30px Pretendard, sans-serif'; c.textAlign = 'right'; c.fillText('No. ' + String(no).padStart(4, '0'), W - P, y);
+  c.textAlign = 'left'; y += 56;
+  c.font = '500 26px Pretendard, sans-serif';
+  c.fillText(`SIGNAL RECEIVED · ${pad(now.getMonth() + 1)}.${pad(now.getDate())} · ${pad(now.getHours())}:${pad(now.getMinutes())}`, P, y);
+  y += 60; dashed(c, y, W, P); y += 44;
+
+  c.font = '600 40px Pretendard, sans-serif'; c.fillText(`[${FILM}]`, P, y); y += 80;
+
+  c.fillStyle = '#FF742F'; c.font = '600 46px Pretendard, sans-serif';
+  for (const l of wrap(c, `“${dialogue.text}”`, W - P * 2)) { c.fillText(l, P, y); y += 64; }
+  y += 36; c.fillStyle = '#171717'; dashed(c, y, W, P); y += 44;
+
+  c.font = '500 28px Pretendard, sans-serif';
+  for (const l of wrap(c, `나의 송신 신호 — ${wish || '…'}`, W - P * 2)) { c.fillText(l, P, y); y += 42; }
+  y += 30;
+
+  // 기대의 결 (퍼센티지)
+  c.font = '600 26px Pretendard, sans-serif'; c.fillText(weak ? '기대의 결 · 신호가 약해 고르게 나눴어요' : '기대의 결', P, y); y += 50;
+  const sorted = EMO_KEYS.slice().sort((a, b) => pct[b] - pct[a]);
+  for (const k of sorted) {
+    const v = pct[k], barX = P + 118, barW = W - P * 2 - 118 - 86;
+    c.font = '500 26px Pretendard, sans-serif'; c.fillStyle = '#171717'; c.fillText(k, P, y);
+    c.fillStyle = 'rgba(23,23,23,0.12)'; c.fillRect(barX, y + 9, barW, 14);
+    c.fillStyle = k === sorted[0] ? '#FF742F' : '#171717'; c.fillRect(barX, y + 9, barW * v, 14);
+    c.fillStyle = '#171717'; c.textAlign = 'right'; c.fillText(Math.round(v * 100) + '%', W - P, y); c.textAlign = 'left';
+    y += 46;
+  }
+  y += 24; dashed(c, y, W, P); y += 44;
+
+  c.font = '500 28px Pretendard, sans-serif';
+  const josa = hasJong(FILM) ? '을' : '를';
+  for (const l of wrap(c, `이번 주 ${FILM}${josa} 기다린 사람들은 ${together}`, W - P * 2)) { c.fillText(l, P, y); y += 42; }
+
+  // 내용이 있는 만큼만 기록지로 잘라 씀
+  const used = Math.min(H, y + 56);
+  paperTex.repeat.set(1, used / H);
+  paperTex.offset.set(0, 1 - used / H);
+  paperTex.needsUpdate = true;
+  PAPER_H = PAPER_W * used / W;
+  paper.geometry.dispose();
+  paper.geometry = new THREE.PlaneGeometry(PAPER_W, PAPER_H);
+}
+function dashed(c, y, W, P) {
+  c.save(); c.strokeStyle = 'rgba(23,23,23,0.45)'; c.lineWidth = 2; c.setLineDash([8, 7]);
+  c.beginPath(); c.moveTo(P, y); c.lineTo(W - P, y); c.stroke(); c.restore();
+}
+
+/* =========================================================
+   7. 송신 → 분석 → 수신
+   ========================================================= */
+let state = 'idle'; // idle | sending | printing | shown | tearing
+let printT = 0, tearT = 0;
+
+async function send(manualText) {
+  if (state === 'sending' || state === 'printing') return;
+  if (state === 'shown') tearOff();
+  hideHint();
+  let text = manualText;
+  if (text == null) {
+    if (!stream || !video.videoWidth) { blink(3); return; }
+    state = 'sending'; scanOn = true;
+    try {
+      const worker = await getWorker();
+      const { data } = await worker.recognize(grabFrame());
+      text = data.text || '';
+    } catch (e) { console.warn(e); text = ''; }
+    scanOn = false;
+  } else state = 'sending';
+
+  const wish = extractWish(text);
+  console.log('[라이카 시그널] 인식된 문장:', JSON.stringify(text), '→', wish);
+  const { pct, weak } = analyze(wish);
+  const { dialogue } = pickDialogue(pct);
+
+  const h = loadHistory(); h.n += 1;
+  if (!weak) for (const k of EMO_KEYS) h.sum[k] = (h.sum[k] || 0) + pct[k];
+  saveHistory(h);
+  const together = Object.keys(h.sum).length ? weave(h.sum) : weave(pct);
+
+  await document.fonts.ready;
+  drawReceipt({ no: h.n, wish, pct, dialogue, together, weak });
+  setTimeout(() => { state = 'printing'; printT = 0; paper.visible = true; paper.material.opacity = 1; }, 600);
+}
+
+let blinkUntil = 0;
+function blink(n) { blinkUntil = performance.now() + n * 260; }
+
+function tearOff() { if (state === 'shown') { state = 'tearing'; tearT = 0; } }
+
+/* =========================================================
+   8. 입력
+   ========================================================= */
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+renderer.domElement.addEventListener('pointerdown', e => {
+  mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects([paper, body, screen], false)[0];
+  if (!hit) return;
+  if (hit.object === paper && paper.visible) tearOff();
+  else if (hit.object === body) send();
+  else if (hit.object === screen) toggleCamera();
+});
+renderer.domElement.addEventListener('pointermove', e => {
+  mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+  ray.setFromCamera(mouse, camera);
+  renderer.domElement.style.cursor = ray.intersectObjects([body, screen, paper], false).length ? 'pointer' : 'default';
+  target.set(mouse.x * 0.12, mouse.y * 0.08);
+});
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { e.preventDefault(); send(); }
+  else if (e.key === 'c' || e.key === 'C') toggleCamera();
+  else if (e.key === 't' || e.key === 'T') {
+    const v = prompt('기대 한 줄을 입력하세요 (예: 이 영화가 나에게 다시 그림을 그리고 싶어지는 영화였으면)');
+    if (v) send(v);
+  }
+  else if (e.key === 'Escape') tearOff();
+});
+const hint = document.getElementById('hint');
+function hideHint() { hint.style.opacity = 0; }
+
+/* =========================================================
+   9. 움직임
+   ========================================================= */
+let scanOn = false;
+const target = new THREE.Vector2(), clock = new THREE.Clock();
+function ease(t) { return 1 - Math.pow(1 - t, 3); }
+
+function tick() {
+  const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+  tx.rotation.y += (target.x - tx.rotation.y) * 0.05;
+  tx.rotation.x += (-target.y - tx.rotation.x) * 0.05;
+  view.rotation.y += (target.x * 0.5 - view.rotation.y) * 0.05;
+
+  // 표시등
+  let glow = 0.0, on = 0.35;
+  if (state === 'sending') { const b = (Math.sin(t * 9) + 1) / 2; on = 0.35 + 0.65 * b; glow = 0.35 * b; }
+  else if (state === 'printing') { on = 1; glow = 0.3 + 0.1 * Math.sin(t * 20); }
+  else if (state === 'shown') { on = 1; glow = 0.18; }
+  if (performance.now() < blinkUntil) { on = Math.sin(t * 24) > 0 ? 1 : 0.2; glow = 0.2; }
+  lamp.material.color.setHex(ORANGE).multiplyScalar(on);
+  lampGlow.material.opacity = glow;
+
+  // 스캔 라인
+  scan.material.opacity = scanOn ? 0.9 : Math.max(0, scan.material.opacity - dt * 3);
+  if (scanOn) scan.position.y = Math.sin(t * 3) * VIEW_H * GUIDE / 2;
+
+  // 출력
+  const slotWorldY = OUT_Y; // tx 로컬 기준
+  if (state === 'printing') {
+    printT += dt / 3.2;
+    const p = Math.min(printT, 1);
+    const stepped = ease(p) + Math.sin(p * 60) * 0.004 * (1 - p); // 프린터처럼 미세하게 끊기는 움직임
+    paper.position.set(0, slotWorldY + PAPER_H / 2 - PAPER_H * stepped, front + 0.03);
+    if (p >= 1) state = 'shown';
+  } else if (state === 'tearing') {
+    tearT += dt / 0.7;
+    const p = Math.min(tearT, 1);
+    paper.position.y -= dt * 3.5 * (0.4 + p);
+    paper.rotation.z = -0.15 * p;
+    paper.material.opacity = 1 - p;
+    if (p >= 1) { state = 'idle'; paper.visible = false; paper.rotation.z = 0; }
+  }
+  // 잘라 내는 평면을 출력구 높이에 맞춤 (월드 좌표)
+  const slotW = new THREE.Vector3(0, slotWorldY, front).applyMatrix4(tx.matrixWorld);
+  clip.constant = slotW.y;
+
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight); layout();
+});
+
+document.fonts.ready.then(drawOff); drawOff();
+cameraOn();
+getWorker().catch(() => {}); // 한국어 인식 데이터를 미리 받아 둠
+tick();
+</script>
+</body>
+</html>
