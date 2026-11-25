@@ -59,29 +59,61 @@ const EMOTIONS = {
   설렘:   ['설렘', '설레', '두근', '기대', '신나', '즐거', '행복', '웃음', '재미', '반짝', '들뜬'],
   용기:   ['용기', '힘', '응원', '다시', '시작', '도전', '꿈', '열정', '앞으로', '원동력', '나아', '버티'],
   그리움: ['그리움', '그립', '추억', '기억', '어린', '친구', '옛', '학창', '향수', '시절', '그때', '보고싶'],
-  영감:   ['영감', '생각', '질문', '이유', '창작', '그림', '만화', '그리', '예술', '의미', '자극', '깨달'],
+  영감:   ['영감', '생각', '질문', '이유', '창작', '그림', '만화', '그리기', '그리는', '예술', '의미', '자극', '깨달음'],
 };
 const EMO_KEYS = Object.keys(EMOTIONS);
 
 /* =========================================================
    2. 분석 — 기대 문장 → 감정 결 퍼센티지 → 가장 가까운 대사
    ========================================================= */
-function bigrams(s) { const a = []; for (let i = 0; i < s.length - 1; i++) a.push(s.slice(i, i + 2)); return a; }
+/* 한글을 자모 단위로 쪼개 비슷한 정도를 계산 — 손글씨 인식이 받침 하나 틀려도 가까운 키워드를 찾도록 */
+function jamo(str) {
+  const out = [];
+  for (const ch of str) {
+    const c = ch.charCodeAt(0) - 0xAC00;
+    if (c >= 0 && c < 11172) {
+      out.push('i' + Math.floor(c / 588), 'm' + Math.floor((c % 588) / 28));
+      if (c % 28) out.push('f' + (c % 28));
+    } else out.push(ch);
+  }
+  return out;
+}
+function lev(a, b) {
+  const dp = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = dp[0]; dp[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = dp[j];
+      dp[j] = Math.min(dp[j] + 1, dp[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return dp[b.length];
+}
+// 키워드가 문장 어딘가에 얼마나 비슷하게 들어 있는지 (0~1)
+function bestSimilarity(text, kw) {
+  const t = [...text], L = [...kw].length, kj = jamo(kw);
+  let best = 0;
+  for (let len = Math.max(1, L - 1); len <= L + 1; len++) {
+    for (let i = 0; i + len <= t.length; i++) {
+      const wj = jamo(t.slice(i, i + len).join(''));
+      const sim = 1 - lev(kj, wj) / Math.max(kj.length, wj.length);
+      if (sim > best) best = sim;
+    }
+  }
+  return best;
+}
 
 function analyze(text) {
-  const t = text.replace(/\s+/g, '');
-  const tb = new Set(bigrams(t));
+  const t = text.replace(/[^가-힣a-zA-Z0-9]/g, '');
   const raw = {};
   for (const k of EMO_KEYS) {
     let s = 0;
-    for (const w of EMOTIONS[k]) {
-      if (t.includes(w)) { s += 1; continue; }
-      // 손글씨 인식이 조금 틀려도 잡히도록 글자쌍 겹침으로 부분 점수
-      const wb = bigrams(w);
-      if (wb.length) {
-        const hit = wb.filter(b => tb.has(b)).length / wb.length;
-        if (hit >= 0.5) s += 0.5 * hit;
-      }
+    for (const w of [k, ...EMOTIONS[k]]) {
+      const sim = bestSimilarity(t, w);
+      if (sim < 0.7) continue;                       // 충분히 비슷할 때만
+      const weight = jamo(w).length;                 // 길고 구체적인 키워드일수록 큰 점수
+      s += Math.pow((sim - 0.7) / 0.3, 2) * weight * (w === k ? 1.5 : 1); // 감정 이름 자체는 가산
     }
     raw[k] = s;
   }
