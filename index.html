@@ -45,12 +45,12 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const FILM = '룩백';
 
 const DIALOGUES = [
-  { text: '그럼 후지노는 왜 만화를 그리는 거야?', tags: { 영감: 0.7, 용기: 0.2, 그리움: 0.1 } }, // 발표 자료의 대사 — 실제 자막과 대조 필요
-  { text: '[대사 후보 — 위로의 결]',   tags: { 위로: 0.8, 쉼: 0.2 } },
-  { text: '[대사 후보 — 쉼의 결]',     tags: { 쉼: 0.8, 위로: 0.2 } },
-  { text: '[대사 후보 — 설렘의 결]',   tags: { 설렘: 0.8, 용기: 0.2 } },
-  { text: '[대사 후보 — 용기의 결]',   tags: { 용기: 0.8, 영감: 0.2 } },
-  { text: '[대사 후보 — 그리움의 결]', tags: { 그리움: 0.8, 위로: 0.2 } },
+  { text: '내 세계에 와줘서 고마워',                     tags: { 위로: 1 } },
+  { text: '후지노, 날 방에서 꺼내줘서 고마워.',           tags: { 쉼: 1 } },
+  { text: '내 만화가 애니메이션이 됐으면 좋겠어.',        tags: { 설렘: 1 } },
+  { text: '혼자 일어서고 싶어... 너한테 의지하지 않고.',  tags: { 용기: 1 } },
+  { text: '후지노는 그림을 왜 그려?',                    tags: { 그리움: 1 } },
+  { text: '그럼 후지노는 왜 만화를 그리는 거야?',         tags: { 영감: 1 } },
 ];
 
 const EMOTIONS = {
@@ -100,7 +100,7 @@ function cosine(a, b) {
 function pickDialogue(pct) {
   let best = DIALOGUES[0], bestScore = -1;
   for (const d of DIALOGUES) {
-    const s = cosine(pct, d.tags) + Math.random() * 0.02; // 비슷하면 살짝 섞이도록
+    const s = cosine(pct, d.tags);
     if (s > bestScore) { bestScore = s; best = d; }
   }
   return { dialogue: best, match: Math.max(0, bestScore) };
