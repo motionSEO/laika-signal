@@ -303,7 +303,10 @@ let workerPromise = null;
 function getWorker() {
   if (!workerPromise) {
     if (typeof Tesseract === 'undefined') return Promise.reject(new Error('Tesseract.js를 불러오지 못했습니다'));
-    workerPromise = Tesseract.createWorker('kor+eng');
+    workerPromise = Tesseract.createWorker('kor').then(async w => {
+      await w.setParameters({ tessedit_pageseg_mode: '6', preserve_interword_spaces: '1' }); // 글씨 한 덩어리로 읽기
+      return w;
+    });
     workerPromise.catch(e => { console.warn('인식 엔진 준비 실패:', e); workerPromise = null; });
   }
   return workerPromise;
@@ -317,10 +320,16 @@ function grabFrame() {
   const g = c.getContext('2d'); g.drawImage(video, sx, sy, cw, ch, 0, 0, c.width, c.height);
   // 흑백 + 대비 강조 (손글씨 인식 보조)
   const img = g.getImageData(0, 0, c.width, c.height), d = img.data;
-  let mean = 0;
-  for (let i = 0; i < d.length; i += 4) { const y = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; d[i] = y; mean += y; }
-  mean /= d.length / 4;
-  const th = mean * 0.82;
+  // Otsu 방식으로 글씨/종이를 가르는 기준값을 자동으로 찾음 (회색 종이·그늘에도 강함)
+  const hist = new Array(256).fill(0), n = d.length / 4;
+  for (let i = 0; i < d.length; i += 4) { const y = (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]) | 0; d[i] = y; hist[y]++; }
+  let sum = 0; for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sumB = 0, wB = 0, best = 0, th = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue; const wF = n - wB; if (!wF) break;
+    sumB += t * hist[t]; const mB = sumB / wB, mF = (sum - sumB) / wF, v = wB * wF * (mB - mF) ** 2;
+    if (v > best) { best = v; th = t; }
+  }
   for (let i = 0; i < d.length; i += 4) { const v = d[i] < th ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = v; }
   g.putImageData(img, 0, 0);
   return c;
@@ -343,7 +352,7 @@ function wrap(ctx, text, maxW) {
   return lines;
 }
 
-function drawReceipt({ no, wish, pct, dialogue, together, weak }) {
+function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
   const c = paperCanvas.getContext('2d'), W = 640, H = 1768, P = 52;
   c.clearRect(0, 0, W, H);
   c.fillStyle = '#F2F2F2'; c.fillRect(0, 0, W, H);
@@ -356,7 +365,11 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak }) {
   c.textAlign = 'left'; y += 56;
   c.font = '500 26px Pretendard, sans-serif';
   c.fillText(`SIGNAL RECEIVED · ${pad(now.getMonth() + 1)}.${pad(now.getDate())} · ${pad(now.getHours())}:${pad(now.getMinutes())}`, P, y);
-  y += 60; dashed(c, y, W, P); y += 44;
+  y += 40;
+  c.font = '500 22px Pretendard, sans-serif'; c.fillStyle = 'rgba(23,23,23,0.55)';
+  c.fillText(via === 'gemini' ? 'READ BY GEMINI' : via === 'manual' ? 'READ BY KEYBOARD' : 'READ BY BROWSER OCR', P, y);
+  c.fillStyle = '#171717';
+  y += 44; dashed(c, y, W, P); y += 44;
 
   c.font = '600 40px Pretendard, sans-serif'; c.fillText(`[${FILM}]`, P, y); y += 80;
 
@@ -479,11 +492,12 @@ async function readWithAI() {
         generationConfig: { temperature: 0.2, response_mime_type: 'application/json', response_schema: AI_SCHEMA },
       }),
     });
-    if (!r.ok) { console.warn('Gemini 응답 오류:', r.status, await r.text()); return null; }
+    if (!r.ok) { lastAIError = `Gemini 오류 ${r.status}`; console.warn('Gemini 응답 오류:', r.status, await r.text()); return null; }
     const data = await r.json();
     return normalize(JSON.parse(data.candidates[0].content.parts[0].text));
-  } catch (e) { console.warn('Gemini 연결 실패:', e); return null; }
+  } catch (e) { lastAIError = 'Gemini 연결 실패'; console.warn('Gemini 연결 실패:', e); return null; }
 }
+let lastAIError = '';
 
 function flashHint(msg) {
   hint.textContent = msg; hint.style.opacity = 1;
@@ -504,12 +518,14 @@ async function send(manualText) {
   if (['sending', 'printing', 'printed', 'rising', 'tearing'].includes(state)) return;
   if (state === 'shown') tearOff();
   hideHint();
-  let text = manualText, wish, pct, weak, via = 'keyword';
+  let text = manualText, wish, pct, weak, via = manualText == null ? 'ocr' : 'manual';
   if (text == null) {
     if (!stream || !video.videoWidth) { blink(3); return; }
     state = 'sending'; scanOn = true;
     // 1) Gemini: 손글씨 읽기 + 감정 결 분석 (로컬 서버가 있을 때)
+    lastAIError = '';
     const ai = await readWithAI();
+    if (!ai) flashHint(lastAIError ? `${lastAIError} — 브라우저 인식으로 대신했어요 (정확도 낮음)` : 'Gemini 키가 없어 브라우저 인식으로 읽었어요 (정확도 낮음) · K 로 키 입력');
     if (ai) { text = ai.text; wish = ai.wish || extractWish(ai.text); pct = ai.emotions; weak = ai.weak; via = 'gemini'; }
     else {
       // 2) 예비: 브라우저 OCR + 키워드 사전
@@ -532,7 +548,7 @@ async function send(manualText) {
   const together = Object.keys(h.sum).length ? weave(h.sum) : weave(pct);
 
   await document.fonts.ready;
-  drawReceipt({ no: h.n, wish, pct, dialogue, together, weak });
+  drawReceipt({ no: h.n, wish, pct, dialogue, together, weak, via });
   setTimeout(() => { resetPaper(); state = 'printing'; printT = 0; paper.visible = true; }, 600);
 }
 
