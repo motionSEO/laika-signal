@@ -181,6 +181,11 @@ const paper = new THREE.Mesh(new THREE.PlaneGeometry(PAPER_W, PAPER_H),
   new THREE.MeshBasicMaterial({ map: paperTex, clippingPlanes: [clip], transparent: true }));
 paper.visible = false; tx.add(paper);
 
+// 기록지가 떠오를 때 뒤를 어둡게
+const dim = new THREE.Mesh(new THREE.PlaneGeometry(200, 200),
+  new THREE.MeshBasicMaterial({ color: BG, transparent: true, opacity: 0, depthWrite: false }));
+dim.position.z = 3; scene.add(dim);
+
 /* 카메라 화면 */
 const VIEW_W = 3.6, VIEW_H = 2.7;
 const video = document.createElement('video'); video.playsInline = true; video.muted = true;
@@ -223,9 +228,9 @@ function layout() {
   const aspect = innerWidth / innerHeight, wide = aspect > 1.15;
   // 수신기: 화면 정중앙에 크게 / 카메라 화면: 작게 왼쪽 위
   tx.scale.setScalar(1.35);
-  tx.position.set(0, 1.0, 0);
+  tx.position.set(0, 0, 0);
   view.scale.setScalar(0.55);
-  camera.position.set(0, -0.9, wide ? 17 : 24);
+  camera.position.set(0, 0, wide ? 17 : 24);
   const halfH = camera.position.z * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   const halfW = halfH * aspect;
   view.position.set(-halfW + 1.5, camera.position.y + halfH - 1.2, 0);
@@ -363,7 +368,7 @@ let state = 'idle'; // idle | sending | printing | shown | tearing
 let printT = 0, tearT = 0;
 
 async function send(manualText) {
-  if (state === 'sending' || state === 'printing') return;
+  if (['sending', 'printing', 'printed', 'rising', 'tearing'].includes(state)) return;
   if (state === 'shown') tearOff();
   hideHint();
   let text = manualText;
@@ -390,8 +395,36 @@ async function send(manualText) {
 
   await document.fonts.ready;
   drawReceipt({ no: h.n, wish, pct, dialogue, together, weak });
-  setTimeout(() => { state = 'printing'; printT = 0; paper.visible = true; paper.material.opacity = 1; }, 600);
+  setTimeout(() => { resetPaper(); state = 'printing'; printT = 0; paper.visible = true; }, 600);
 }
+
+// 기록지를 다시 수신기에 붙이고 처음 상태로
+function resetPaper() {
+  tx.add(paper);
+  paper.position.set(0, OUT_Y + PAPER_H / 2, front + 0.03);
+  paper.rotation.set(0, 0, 0);
+  paper.scale.set(1, 1, 1);
+  paper.material.opacity = 1;
+  paper.material.clippingPlanes = [clip];
+  paper.material.needsUpdate = true;
+  dim.material.opacity = 0;
+}
+
+// 출력이 끝나면 화면 가운데로 떠올라 크게 읽히도록
+const rise = { from: new THREE.Vector3(), fromQ: new THREE.Quaternion(), fromS: 1, to: new THREE.Vector3(), toS: 1 };
+function startRise() {
+  scene.attach(paper); // 월드 위치를 유지한 채 수신기에서 떼어 냄
+  paper.material.clippingPlanes = [];
+  paper.material.needsUpdate = true;
+  rise.from.copy(paper.position); rise.fromQ.copy(paper.quaternion); rise.fromS = paper.scale.x;
+  const z = 6;
+  const visH = 2 * (camera.position.z - z) * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const visW = visH * camera.aspect;
+  const s = Math.min(visH * 0.86 / PAPER_H, visW * 0.8 / PAPER_W);
+  rise.to.set(0, camera.position.y, z); rise.toS = s;
+  state = 'rising'; riseT = 0;
+}
+let riseT = 0;
 
 let blinkUntil = 0;
 function blink(n) { blinkUntil = performance.now() + n * 260; }
@@ -407,7 +440,7 @@ renderer.domElement.addEventListener('pointerdown', e => {
   ray.setFromCamera(mouse, camera);
   const hit = ray.intersectObjects([paper, body, screen], false)[0];
   if (!hit) return;
-  if (hit.object === paper && paper.visible) tearOff();
+  if (hit.object === paper && paper.visible) { if (state === 'shown') tearOff(); }
   else if (hit.object === body) send();
   else if (hit.object === screen) toggleCamera();
 });
@@ -445,8 +478,8 @@ function tick() {
   // 표시등
   let glow = 0.0, on = 0.35;
   if (state === 'sending') { const b = (Math.sin(t * 9) + 1) / 2; on = 0.35 + 0.65 * b; glow = 0.35 * b; }
-  else if (state === 'printing') { on = 1; glow = 0.3 + 0.1 * Math.sin(t * 20); }
-  else if (state === 'shown') { on = 1; glow = 0.18; }
+  else if (state === 'printing' || state === 'printed') { on = 1; glow = 0.3 + 0.1 * Math.sin(t * 20); }
+  else if (state === 'shown' || state === 'rising') { on = 1; glow = 0.18; }
   if (performance.now() < blinkUntil) { on = Math.sin(t * 24) > 0 ? 1 : 0.2; glow = 0.2; }
   lamp.material.color.setHex(ORANGE).multiplyScalar(on);
   lampGlow.material.opacity = glow;
@@ -462,14 +495,25 @@ function tick() {
     const p = Math.min(printT, 1);
     const stepped = ease(p) + Math.sin(p * 60) * 0.004 * (1 - p); // 프린터처럼 미세하게 끊기는 움직임
     paper.position.set(0, slotWorldY + PAPER_H / 2 - PAPER_H * stepped, front + 0.03);
+    if (p >= 1) setTimeout(() => { if (state === 'printed') startRise(); }, 350), state = 'printed';
+  } else if (state === 'rising') {
+    riseT += dt / 1.1;
+    const p = Math.min(riseT, 1), e = 1 - Math.pow(1 - p, 4);
+    paper.position.lerpVectors(rise.from, rise.to, e);
+    paper.position.z += Math.sin(p * Math.PI) * 1.2; // 살짝 떠오르는 궤적
+    paper.quaternion.slerpQuaternions(rise.fromQ, new THREE.Quaternion(), e);
+    paper.scale.setScalar(rise.fromS + (rise.toS - rise.fromS) * e);
+    dim.material.opacity = 0.62 * e;
     if (p >= 1) state = 'shown';
+  } else if (state === 'shown') {
+    paper.position.y = rise.to.y + Math.sin(t * 1.2) * 0.04; // 떠 있는 느낌
   } else if (state === 'tearing') {
-    tearT += dt / 0.7;
+    tearT += dt / 0.6;
     const p = Math.min(tearT, 1);
-    paper.position.y -= dt * 3.5 * (0.4 + p);
-    paper.rotation.z = -0.15 * p;
+    paper.position.y += dt * 4 * (0.3 + p);
     paper.material.opacity = 1 - p;
-    if (p >= 1) { state = 'idle'; paper.visible = false; paper.rotation.z = 0; }
+    dim.material.opacity = 0.62 * (1 - p);
+    if (p >= 1) { state = 'idle'; resetPaper(); paper.visible = false; dim.material.opacity = 0; }
   }
   // 잘라 내는 평면을 출력구 높이에 맞춤 (월드 좌표)
   const slotW = new THREE.Vector3(0, slotWorldY, front).applyMatrix4(tx.matrixWorld);
