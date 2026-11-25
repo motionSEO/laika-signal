@@ -405,25 +405,59 @@ function dashed(c, y, W, P) {
 let state = 'idle'; // idle | sending | printing | shown | tearing
 let printT = 0, tearT = 0;
 
+/* Gemini 연동 — server.py 로 열었을 때만 사용 (키는 서버에만 있음) */
+let aiReady = null;
+async function aiAvailable() {
+  if (aiReady === null) {
+    try { const r = await fetch('api/status'); aiReady = r.ok && (await r.json()).ai; }
+    catch { aiReady = false; }
+  }
+  return aiReady;
+}
+function grabColor() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const cw = vw * GUIDE, ch = vh * GUIDE, sx = (vw - cw) / 2, sy = (vh - ch) / 2;
+  const scale = Math.min(1, 1280 / cw);
+  const c = document.createElement('canvas'); c.width = cw * scale; c.height = ch * scale;
+  c.getContext('2d').drawImage(video, sx, sy, cw, ch, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.9);
+}
+async function readWithAI() {
+  if (!(await aiAvailable())) return null;
+  try {
+    const r = await fetch('api/read', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: grabColor() }) });
+    if (!r.ok) { console.warn('Gemini 응답 오류:', await r.text()); return null; }
+    const d = await r.json();
+    if (!d.emotions) return null;
+    return d;
+  } catch (e) { console.warn('Gemini 연결 실패:', e); return null; }
+}
+
 async function send(manualText) {
   if (['sending', 'printing', 'printed', 'rising', 'tearing'].includes(state)) return;
   if (state === 'shown') tearOff();
   hideHint();
-  let text = manualText;
+  let text = manualText, wish, pct, weak, via = 'keyword';
   if (text == null) {
     if (!stream || !video.videoWidth) { blink(3); return; }
     state = 'sending'; scanOn = true;
-    try {
-      const worker = await getWorker();
-      const { data } = await worker.recognize(grabFrame());
-      text = data.text || '';
-    } catch (e) { console.warn(e); text = ''; }
+    // 1) Gemini: 손글씨 읽기 + 감정 결 분석 (로컬 서버가 있을 때)
+    const ai = await readWithAI();
+    if (ai) { text = ai.text; wish = ai.wish || extractWish(ai.text); pct = ai.emotions; weak = ai.weak; via = 'gemini'; }
+    else {
+      // 2) 예비: 브라우저 OCR + 키워드 사전
+      try {
+        const worker = await getWorker();
+        const { data } = await worker.recognize(grabFrame());
+        text = data.text || '';
+      } catch (e) { console.warn(e); text = ''; }
+    }
     scanOn = false;
   } else state = 'sending';
 
-  const wish = extractWish(text);
-  console.log('[라이카 시그널] 인식된 문장:', JSON.stringify(text), '→', wish);
-  const { pct, weak } = analyze(wish);
+  if (!pct) { wish = extractWish(text); ({ pct, weak } = analyze(wish)); }
+  console.log(`[라이카 시그널] (${via}) 인식:`, JSON.stringify(text), '→', wish, pct);
   const { dialogue } = pickDialogue(pct);
 
   const h = loadHistory(); h.n += 1;

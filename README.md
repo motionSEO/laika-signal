@@ -6,11 +6,17 @@
 - 기대 문장을 감정 결 6가지(위로 · 쉼 · 설렘 · 용기 · 그리움 · 영감) 퍼센티지로 나눈 뒤
 - 가장 가까운 영화 대사를 골라 수신기에서 기록지로 출력합니다 (three.js).
 
-## 실행
+## 실행 (Gemini 손글씨 인식 사용)
+1. Google AI Studio 에서 API 키를 발급한다.
+2. `.env.example` 을 복사해 `.env` 로 이름을 바꾸고 `GEMINI_API_KEY=` 뒤에 키를 넣는다. (`.env` 는 GitHub 에 올라가지 않음)
+3. 이 폴더에서 실행한다.
 ```bash
-python3 -m http.server 8000
+python3 server.py
 ```
-브라우저에서 http://localhost:8000 을 엽니다. 인터넷 연결이 필요합니다.
+4. 브라우저에서 http://localhost:8000 을 연다.
+
+키가 없거나 Gemini 연결이 실패하면 브라우저 OCR + 키워드 분석으로 자동 전환됩니다.
+GitHub Pages 주소로 열면 서버가 없으므로 항상 브라우저 OCR 방식으로 동작합니다.
 
 ## 조작
 - 송신기 클릭 / Space: 카드 인식 후 송신
