@@ -16,13 +16,19 @@ python3 server.py
 4. 브라우저에서 http://localhost:8000 을 연다.
 
 키가 없거나 Gemini 연결이 실패하면 브라우저 OCR + 키워드 분석으로 자동 전환됩니다.
-GitHub Pages 주소로 열면 서버가 없으므로 항상 브라우저 OCR 방식으로 동작합니다.
+
+## GitHub Pages 주소에서 Gemini 쓰기
+1. https://motionseo.github.io/laika-signal/ 을 연다.
+2. 키보드 K 를 누르고 Gemini API 키를 붙여 넣는다.
+3. 키는 그 브라우저(localStorage)에만 저장되고, Google 외 다른 곳으로 보내지지 않는다.
+   다시 K 를 눌러 비워 두고 확인하면 삭제된다. 공용 컴퓨터에서는 시연 후 꼭 지울 것.
 
 ## 조작
 - 송신기 클릭 / Space: 카드 인식 후 송신
 - 카메라 화면 클릭 / C: 카메라 켜기·끄기
 - T: 기대 문장 직접 입력
 - 기록지 클릭 / Esc: 기록지 치우기
+- K: Gemini API 키 입력·삭제 (이 브라우저에만 저장)
 
 ## 데이터
 `index.html` 위쪽의 `DIALOGUES`(대사 후보)와 `EMOTIONS`(감정 키워드)를 고쳐 쓰면 됩니다.

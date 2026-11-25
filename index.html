@@ -25,7 +25,7 @@
 </script>
 </head>
 <body>
-<div id="hint">카드를 프레임 안에 비추고 송신기를 클릭 <b>Space</b> · 카메라 <b>C</b> · 직접 입력 <b>T</b> · 기록지 치우기 <b>Esc</b></div>
+<div id="hint">카드를 프레임 안에 비추고 송신기를 클릭 <b>Space</b> · 카메라 <b>C</b> · 직접 입력 <b>T</b> · 기록지 치우기 <b>Esc</b> · Gemini 키 <b>K</b></div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -405,14 +405,43 @@ function dashed(c, y, W, P) {
 let state = 'idle'; // idle | sending | printing | shown | tearing
 let printT = 0, tearT = 0;
 
-/* Gemini 연동 — server.py 로 열었을 때만 사용 (키는 서버에만 있음) */
-let aiReady = null;
-async function aiAvailable() {
-  if (aiReady === null) {
-    try { const r = await fetch('api/status'); aiReady = r.ok && (await r.json()).ai; }
-    catch { aiReady = false; }
+const hint = document.getElementById('hint');
+/* Gemini 연동
+   1) server.py 로 열었으면 로컬 서버를 거쳐서 (키는 서버의 .env 에)
+   2) 아니면 이 브라우저에 저장한 키로 직접 (K 키로 입력, 이 브라우저에만 저장)
+   3) 둘 다 없거나 실패하면 브라우저 OCR + 키워드 사전으로 */
+const GEMINI_MODEL = 'gemini-2.5-flash';
+const KEY_STORE = 'laika-gemini-key';
+function getKey() { try { return localStorage.getItem(KEY_STORE) || ''; } catch { return ''; } }
+function setKey(v) { try { v ? localStorage.setItem(KEY_STORE, v) : localStorage.removeItem(KEY_STORE); } catch {} }
+
+const AI_PROMPT = `이 사진은 영화관 관객이 손으로 쓴 카드입니다.
+카드에는 보통 "이 영화가 나에게 ____ 영화였으면" 같은 문장이 적혀 있습니다.
+1. 카드에 적힌 손글씨를 그대로 읽어 text 에 적으세요. 읽을 수 없으면 빈 문자열.
+2. 빈칸에 해당하는 관객의 기대 부분만 wish 에 적으세요. (예: "다시 그림을 그리고 싶어지는")
+3. 그 기대의 정서를 다음 6가지 감정 결로 나누어 합이 1이 되는 비율로 emotions 에 적으세요:
+   ${EMO_KEYS.join(', ')}
+   - 위로: 위안, 따뜻함, 치유   - 쉼: 휴식, 고요, 여유
+   - 설렘: 기대, 두근거림, 즐거움   - 용기: 응원, 다시 시작, 힘
+   - 그리움: 추억, 지난 시절, 사람   - 영감: 창작, 질문, 생각할 거리
+글자가 없거나 카드가 아니면 text 와 wish 를 빈 문자열로, emotions 는 모두 0 으로 두세요.
+반드시 JSON 만 출력하세요.`;
+const AI_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    text: { type: 'STRING' }, wish: { type: 'STRING' },
+    emotions: { type: 'OBJECT', properties: Object.fromEntries(EMO_KEYS.map(k => [k, { type: 'NUMBER' }])), required: EMO_KEYS },
+  },
+  required: ['text', 'wish', 'emotions'],
+};
+
+let serverReady = null;
+async function serverAvailable() {
+  if (serverReady === null) {
+    try { const r = await fetch('api/status'); serverReady = r.ok && (await r.json()).ai; }
+    catch { serverReady = false; }
   }
-  return aiReady;
+  return serverReady;
 }
 function grabColor() {
   const vw = video.videoWidth, vh = video.videoHeight;
@@ -422,16 +451,53 @@ function grabColor() {
   c.getContext('2d').drawImage(video, sx, sy, cw, ch, 0, 0, c.width, c.height);
   return c.toDataURL('image/jpeg', 0.9);
 }
+function normalize(d) {
+  if (!d || !d.emotions) return null;
+  const emo = {}; let total = 0;
+  for (const k of EMO_KEYS) { emo[k] = Math.max(0, Number(d.emotions[k]) || 0); total += emo[k]; }
+  for (const k of EMO_KEYS) emo[k] = total ? emo[k] / total : 1 / EMO_KEYS.length;
+  return { text: d.text || '', wish: d.wish || '', emotions: emo, weak: total === 0 };
+}
 async function readWithAI() {
-  if (!(await aiAvailable())) return null;
+  const image = grabColor();
   try {
-    const r = await fetch('api/read', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ image: grabColor() }) });
-    if (!r.ok) { console.warn('Gemini 응답 오류:', await r.text()); return null; }
-    const d = await r.json();
-    if (!d.emotions) return null;
-    return d;
+    if (await serverAvailable()) {
+      const r = await fetch('api/read', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image }) });
+      if (r.ok) return normalize(await r.json());
+      console.warn('로컬 서버 응답 오류:', await r.text());
+    }
+    const key = getKey();
+    if (!key) return null;
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { inline_data: { mime_type: 'image/jpeg', data: image.split(',')[1] } },
+          { text: AI_PROMPT },
+        ] }],
+        generationConfig: { temperature: 0.2, response_mime_type: 'application/json', response_schema: AI_SCHEMA },
+      }),
+    });
+    if (!r.ok) { console.warn('Gemini 응답 오류:', r.status, await r.text()); return null; }
+    const data = await r.json();
+    return normalize(JSON.parse(data.candidates[0].content.parts[0].text));
   } catch (e) { console.warn('Gemini 연결 실패:', e); return null; }
+}
+
+function flashHint(msg) {
+  hint.textContent = msg; hint.style.opacity = 1;
+  clearTimeout(flashHint.t); flashHint.t = setTimeout(hideHint, 2600);
+}
+function askKey() {
+  const cur = getKey();
+  const v = prompt(cur
+    ? 'Gemini API 키가 이 브라우저에 저장되어 있어요.\n새 키를 넣으면 바뀌고, 비워 두고 확인을 누르면 삭제됩니다.'
+    : 'Gemini API 키를 붙여 넣으세요.\n이 브라우저에만 저장되고, 다른 곳으로는 보내지지 않습니다.', '');
+  if (v === null) return;
+  setKey(v.trim());
+  flashHint(v.trim() ? 'Gemini 인식 켜짐 — 이 브라우저에 키가 저장되었어요' : 'Gemini 키를 지웠어요 — 브라우저 인식으로 동작합니다');
+  blink(2);
 }
 
 async function send(manualText) {
@@ -534,8 +600,8 @@ addEventListener('keydown', e => {
     if (v) send(v);
   }
   else if (e.key === 'Escape') tearOff();
+  else if (e.key === 'k' || e.key === 'K') askKey();
 });
-const hint = document.getElementById('hint');
 function hideHint() { hint.style.opacity = 0; }
 
 /* =========================================================
