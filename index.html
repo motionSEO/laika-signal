@@ -6,15 +6,15 @@
 <title>라이카 시그널 · 프로토타입</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css">
 <style>
-  html, body { margin: 0; height: 100%; background: #171717; overflow: hidden; }
+  html, body { margin: 0; height: 100%; background: #e3e1dc; overflow: hidden; }
   body { font-family: 'Pretendard', system-ui, sans-serif; color: #fff; }
   canvas { display: block; }
   #hint {
     position: fixed; left: 0; right: 0; bottom: 28px; text-align: center;
-    font-size: 13px; letter-spacing: 0.02em; color: rgba(255,255,255,0.42);
+    font-size: 13px; letter-spacing: 0.02em; color: rgba(23,23,23,0.45);
     transition: opacity 1.2s ease; pointer-events: none;
   }
-  #hint b { color: rgba(255,255,255,0.7); font-weight: 600; }
+  #hint b { color: rgba(23,23,23,0.75); font-weight: 600; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.0/dist/tesseract.min.js"></script>
 <script type="importmap">
@@ -30,6 +30,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 /* =========================================================
    1. 데이터 — 여기만 고치면 됩니다
@@ -129,73 +130,130 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.localClippingEnabled = true;
 document.body.appendChild(renderer.domElement);
 
+const TABLE = 0xeeece8;
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(BG);
-const camera = new THREE.PerspectiveCamera(32, innerWidth / innerHeight, 0.1, 100);
-camera.position.set(0, -0.4, 14);
+scene.background = new THREE.Color(0xe3e1dc);
+scene.fog = new THREE.Fog(0xe3e1dc, 22, 42);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
 
-scene.add(new THREE.AmbientLight(0xffffff, 1.4));
-const key = new THREE.DirectionalLight(0xffffff, 1.6); key.position.set(3, 4, 6); scene.add(key);
+const camera = new THREE.PerspectiveCamera(30, innerWidth / innerHeight, 0.1, 100);
+scene.add(camera);
+const LOOK = new THREE.Vector3(0, 1.25, 0.2);
 
-function outline(geo, scale = 1.025) {
-  const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0xeeeeee, side: THREE.BackSide }));
-  m.scale.setScalar(scale); return m;
+/* 빛: 창가에서 들어오는 부드러운 낮빛 */
+scene.add(new THREE.HemisphereLight(0xffffff, 0xd9d4cc, 0.55));
+const sun = new THREE.DirectionalLight(0xfff6ea, 2.2);
+sun.position.set(-5, 9, 4);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.camera.left = -6; sun.shadow.camera.right = 6;
+sun.shadow.camera.top = 6; sun.shadow.camera.bottom = -6;
+sun.shadow.radius = 6; sun.shadow.bias = -0.0004;
+scene.add(sun);
+
+/* 흰 테이블 */
+const table = new THREE.Mesh(new THREE.PlaneGeometry(80, 80),
+  new THREE.MeshStandardMaterial({ color: TABLE, roughness: 0.92 }));
+table.rotation.x = -Math.PI / 2; table.receiveShadow = true; scene.add(table);
+
+// 바닥에 닿는 부분의 은은한 접지 그림자
+{
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(128, 128, 10, 128, 128, 128);
+  gr.addColorStop(0, 'rgba(0,0,0,0.38)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 256, 256);
+  const ao = new THREE.Mesh(new THREE.PlaneGeometry(4.6, 5.0),
+    new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false }));
+  ao.rotation.x = -Math.PI / 2; ao.position.set(0, 0.002, 0.1); scene.add(ao);
 }
 
-/* 송신기 */
+/* 송신기 — 흰색 영수증 프린터 */
 const tx = new THREE.Group(); scene.add(tx);
-const BODY_W = 2.6, BODY_H = 3.4, BODY_D = 1.4;
-const bodyGeo = new RoundedBoxGeometry(BODY_W, BODY_H, BODY_D, 6, 0.28);
-const body = new THREE.Mesh(bodyGeo, new THREE.MeshStandardMaterial({ color: 0xf2f2f2, roughness: 0.6, metalness: 0.05 }));
-tx.add(body);
+const clickables = [];
+const plastic = new THREE.MeshStandardMaterial({ color: 0xebe8e1, roughness: 0.5, metalness: 0.0 });
+const plasticDark = new THREE.MeshStandardMaterial({ color: 0xdcd8cf, roughness: 0.6 });
+const recess = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 });
+const panelMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.35, metalness: 0.2 });
 
-const front = BODY_D / 2;
-function slot(w, y) {
-  const g = new RoundedBoxGeometry(w, 0.1, 0.06, 3, 0.04);
-  const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0x0d0d0d }));
-  m.position.set(0, y, front + 0.005);
-  const o = outline(g, 1.06); o.position.copy(m.position);
-  tx.add(o, m); return m;
+function part(geo, mat, x, y, z) {
+  const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z);
+  m.castShadow = true; m.receiveShadow = true; tx.add(m); clickables.push(m); return m;
 }
-const inSlot = slot(1.5, 1.2);
-const OUT_Y = -1.2;
-const outSlot = slot(1.8, OUT_Y);
+// 받침
+part(new RoundedBoxGeometry(3.0, 0.24, 3.6, 4, 0.06), plasticDark, 0, 0.12, 0.15);
+// 아래 몸체
+part(new RoundedBoxGeometry(2.6, 1.15, 3.0, 6, 0.12), plastic, 0, 0.24 + 0.575, -0.05);
+// 뒤쪽 둥근 용지 덮개
+const hood = part(new THREE.CylinderGeometry(0.8, 0.8, 2.36, 64), plastic, 0, 1.39, -0.75);
+hood.rotation.z = Math.PI / 2; // 가로로 누운 원통, 아래 절반은 몸체 안에 묻힘
+part(new RoundedBoxGeometry(2.36, 0.12, 1.6, 3, 0.05), plastic, 0, 1.42, -0.75); // 덮개 아래 이음
+// 앞쪽 출력 블록
+const FRONT_TOP = 2.12;
+part(new RoundedBoxGeometry(2.3, 0.78, 1.5, 6, 0.1), plastic, 0, FRONT_TOP - 0.39, 0.55);
+// 오른쪽 위 손잡이 고리
+const loop = part(new THREE.TorusGeometry(0.26, 0.05, 12, 40, Math.PI), plastic, 1.2, 1.55, -0.15);
+loop.rotation.y = Math.PI / 2;
 
-const lamp = new THREE.Mesh(new THREE.CircleGeometry(0.15, 48), new THREE.MeshBasicMaterial({ color: ORANGE }));
-lamp.position.set(0, 0.05, front + 0.01); tx.add(lamp);
-const lampGlow = new THREE.Mesh(new THREE.CircleGeometry(0.42, 48),
-  new THREE.MeshBasicMaterial({ color: ORANGE, transparent: true, opacity: 0, depthWrite: false }));
-lampGlow.position.set(0, 0.05, front + 0.005); tx.add(lampGlow);
+// 송신 — 카드를 넣는 곳 (덮개 위)
+const IN_Y = 2.19;
+part(new RoundedBoxGeometry(1.5, 0.06, 0.14, 2, 0.03), recess, 0, IN_Y, -0.75);
+// 수신 — 기록지가 나오는 곳 (앞 블록 위)
+const OUT_Y = FRONT_TOP + 0.005, OUT_Z = 0.95;
+part(new RoundedBoxGeometry(1.75, 0.04, 0.12, 2, 0.02), recess, 0, OUT_Y, OUT_Z);
+
+// 앞면 아래 조작부 + 표시등
+part(new RoundedBoxGeometry(0.78, 0.42, 0.06, 3, 0.03), panelMat, 0.78, 0.62, 1.47);
+const ledMat = (c, e) => new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: e, roughness: 0.3 });
+const ledG1 = part(new THREE.SphereGeometry(0.035, 16, 16), ledMat(0x37d067, 1.2), 0.58, 0.72, 1.51);
+const ledG2 = part(new THREE.SphereGeometry(0.035, 16, 16), ledMat(0x37d067, 0.25), 0.72, 0.72, 1.51);
+const lamp = part(new THREE.SphereGeometry(0.06, 20, 20), ledMat(ORANGE, 0.4), 0.98, 0.72, 1.52);
+const lampLight = new THREE.PointLight(ORANGE, 0, 1.6); lampLight.position.set(0.98, 0.72, 1.7); tx.add(lampLight);
+const lampGlow = { material: { opacity: 0 } }; // 이전 코드 호환용
+// 뒤쪽 전원선
+{
+  const curve = new THREE.CatmullRomCurve3([
+    new THREE.Vector3(-1.0, 0.5, -1.55), new THREE.Vector3(-1.2, 0.25, -2.1),
+    new THREE.Vector3(-2.0, 0.05, -2.4), new THREE.Vector3(-4.5, 0.05, -2.0)]);
+  const cable = new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 0.045, 8),
+    new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5 }));
+  cable.castShadow = true; tx.add(cable);
+}
+const body = { isPrinter: true }; // 클릭 판정은 clickables 로
 
 /* 기록지 */
-const PAPER_W = 1.6;
+const PAPER_W = 1.55;
 let PAPER_H = 2.6; // 기록지 내용 길이에 맞춰 다시 계산됨
 const paperCanvas = document.createElement('canvas'); paperCanvas.width = 640; paperCanvas.height = 1768;
 const paperTex = new THREE.CanvasTexture(paperCanvas); paperTex.colorSpace = THREE.SRGBColorSpace;
 paperTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
-const clip = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0); // 출력구 위는 잘라 냄
+const clip = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // 출력구 아래는 잘라 냄
 const paper = new THREE.Mesh(new THREE.PlaneGeometry(PAPER_W, PAPER_H),
-  new THREE.MeshBasicMaterial({ map: paperTex, clippingPlanes: [clip], transparent: true }));
+  new THREE.MeshBasicMaterial({ map: paperTex, clippingPlanes: [clip], transparent: true, side: THREE.DoubleSide }));
 paper.visible = false; tx.add(paper);
+const PAPER_TILT = -0.12; // 기록지가 살짝 뒤로 기울어 나옴
 
-// 기록지가 떠오를 때 뒤를 어둡게
-const dim = new THREE.Mesh(new THREE.PlaneGeometry(200, 200),
-  new THREE.MeshBasicMaterial({ color: BG, transparent: true, opacity: 0, depthWrite: false }));
-dim.position.z = 3; scene.add(dim);
+// 기록지가 떠오를 때 뒤를 어둡게 (화면에 붙어 있는 막)
+const dim = new THREE.Mesh(new THREE.PlaneGeometry(60, 60),
+  new THREE.MeshBasicMaterial({ color: BG, transparent: true, opacity: 0, depthWrite: false, depthTest: false }));
+dim.position.z = -6.5; dim.renderOrder = 5; camera.add(dim);
 
-/* 카메라 화면 */
+/* 카메라 화면 (화면 왼쪽 위에 고정) */
 const VIEW_W = 3.6, VIEW_H = 2.7;
 const video = document.createElement('video'); video.playsInline = true; video.muted = true;
 const offCanvas = document.createElement('canvas'); offCanvas.width = 720; offCanvas.height = 540;
 const offTex = new THREE.CanvasTexture(offCanvas); offTex.colorSpace = THREE.SRGBColorSpace;
 const videoTex = new THREE.VideoTexture(video); videoTex.colorSpace = THREE.SRGBColorSpace;
-const view = new THREE.Group(); scene.add(view);
+const view = new THREE.Group(); camera.add(view);
 const screenGeo = new THREE.PlaneGeometry(VIEW_W, VIEW_H);
-const screen = new THREE.Mesh(screenGeo, new THREE.MeshBasicMaterial({ map: offTex }));
-const frame = new THREE.LineSegments(new THREE.EdgesGeometry(screenGeo), new THREE.LineBasicMaterial({ color: 0xeeeeee }));
+const screen = new THREE.Mesh(screenGeo, new THREE.MeshBasicMaterial({ map: offTex, toneMapped: false }));
+const frame = new THREE.LineSegments(new THREE.EdgesGeometry(screenGeo), new THREE.LineBasicMaterial({ color: 0x9a968f }));
 view.add(screen, frame);
 
 // 카드 인식 영역(가운데 70%) 모서리 표시
@@ -216,24 +274,28 @@ scan.position.z = 0.02; view.add(scan);
 
 function drawOff() {
   const c = offCanvas.getContext('2d');
-  c.fillStyle = '#1d1d1d'; c.fillRect(0, 0, 720, 540);
-  c.fillStyle = 'rgba(255,255,255,0.45)'; c.textAlign = 'center';
+  c.fillStyle = '#d6d3cd'; c.fillRect(0, 0, 720, 540);
+  c.fillStyle = 'rgba(23,23,23,0.55)'; c.textAlign = 'center';
   c.font = '500 30px Pretendard, sans-serif'; c.fillText('카메라 꺼짐', 360, 262);
   c.font = '500 22px Pretendard, sans-serif'; c.fillText('클릭하거나 C 를 눌러 켜기', 360, 304);
   offTex.needsUpdate = true;
 }
 
 /* 배치 */
+const VIEW_DIST = 9;
 function layout() {
   const aspect = innerWidth / innerHeight, wide = aspect > 1.15;
-  // 수신기: 화면 정중앙에 크게 / 카메라 화면: 작게 왼쪽 위
-  tx.scale.setScalar(1.35);
-  tx.position.set(0, 0, 0);
-  view.scale.setScalar(0.55);
-  camera.position.set(0, 0, wide ? 17 : 24);
-  const halfH = camera.position.z * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  // 위에서 비스듬히 내려다보는 시점, 송신기는 화면 정중앙
+  const dist = wide ? 13.5 : 19;
+  const dir = new THREE.Vector3(0, 0.72, 0.69).normalize();
+  camera.position.copy(LOOK).addScaledVector(dir, dist);
+  camera.lookAt(LOOK);
+  // 카메라 화면은 화면 왼쪽 위에 고정
+  const halfH = VIEW_DIST * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   const halfW = halfH * aspect;
-  view.position.set(-halfW + 1.5, camera.position.y + halfH - 1.2, 0);
+  const s = Math.min(0.5, (halfW * 2 * 0.2) / VIEW_W);
+  view.scale.setScalar(s);
+  view.position.set(-halfW + VIEW_W * s / 2 + 0.25, halfH - VIEW_H * s / 2 - 0.25, -VIEW_DIST);
 }
 layout();
 
@@ -401,8 +463,9 @@ async function send(manualText) {
 // 기록지를 다시 수신기에 붙이고 처음 상태로
 function resetPaper() {
   tx.add(paper);
-  paper.position.set(0, OUT_Y + PAPER_H / 2, front + 0.03);
-  paper.rotation.set(0, 0, 0);
+  paper.position.set(0, OUT_Y - PAPER_H / 2, OUT_Z);
+  paper.rotation.set(PAPER_TILT, 0, 0);
+  paper.renderOrder = 0;
   paper.scale.set(1, 1, 1);
   paper.material.opacity = 1;
   paper.material.clippingPlanes = [clip];
@@ -417,11 +480,14 @@ function startRise() {
   paper.material.clippingPlanes = [];
   paper.material.needsUpdate = true;
   rise.from.copy(paper.position); rise.fromQ.copy(paper.quaternion); rise.fromS = paper.scale.x;
-  const z = 6;
-  const visH = 2 * (camera.position.z - z) * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const d = 6; // 카메라 앞 거리
+  const visH = 2 * d * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   const visW = visH * camera.aspect;
   const s = Math.min(visH * 0.86 / PAPER_H, visW * 0.8 / PAPER_W);
-  rise.to.set(0, camera.position.y, z); rise.toS = s;
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  rise.to.copy(camera.position).addScaledVector(dir, d); rise.toS = s;
+  rise.toQ = camera.quaternion.clone();
+  paper.renderOrder = 10;
   state = 'rising'; riseT = 0;
 }
 let riseT = 0;
@@ -438,16 +504,16 @@ const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
 renderer.domElement.addEventListener('pointerdown', e => {
   mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
-  const hit = ray.intersectObjects([paper, body, screen], false)[0];
+  const hit = ray.intersectObjects([paper, screen, ...clickables], false)[0];
   if (!hit) return;
   if (hit.object === paper && paper.visible) { if (state === 'shown') tearOff(); }
-  else if (hit.object === body) send();
+  else if (clickables.includes(hit.object)) send();
   else if (hit.object === screen) toggleCamera();
 });
 renderer.domElement.addEventListener('pointermove', e => {
   mouse.set(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   ray.setFromCamera(mouse, camera);
-  renderer.domElement.style.cursor = ray.intersectObjects([body, screen, paper], false).length ? 'pointer' : 'default';
+  renderer.domElement.style.cursor = ray.intersectObjects([screen, paper, ...clickables], false).length ? 'pointer' : 'default';
   target.set(mouse.x * 0.12, mouse.y * 0.08);
 });
 addEventListener('keydown', e => {
@@ -471,9 +537,7 @@ function ease(t) { return 1 - Math.pow(1 - t, 3); }
 
 function tick() {
   const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
-  tx.rotation.y += (target.x - tx.rotation.y) * 0.05;
-  tx.rotation.x += (-target.y - tx.rotation.x) * 0.05;
-  view.rotation.y += (target.x * 0.5 - view.rotation.y) * 0.05;
+  tx.rotation.y += (target.x * 1.2 - tx.rotation.y) * 0.04;
 
   // 표시등
   let glow = 0.0, on = 0.35;
@@ -481,8 +545,9 @@ function tick() {
   else if (state === 'printing' || state === 'printed') { on = 1; glow = 0.3 + 0.1 * Math.sin(t * 20); }
   else if (state === 'shown' || state === 'rising') { on = 1; glow = 0.18; }
   if (performance.now() < blinkUntil) { on = Math.sin(t * 24) > 0 ? 1 : 0.2; glow = 0.2; }
-  lamp.material.color.setHex(ORANGE).multiplyScalar(on);
-  lampGlow.material.opacity = glow;
+  lamp.material.emissiveIntensity = 0.15 + on * 2.2;
+  lampLight.intensity = glow * 6;
+  ledG2.material.emissiveIntensity = (state === 'printing') ? 0.4 + 0.8 * (Math.sin(t * 30) > 0) : 0.25;
 
   // 스캔 라인
   scan.material.opacity = scanOn ? 0.9 : Math.max(0, scan.material.opacity - dt * 3);
@@ -494,14 +559,14 @@ function tick() {
     printT += dt / 3.2;
     const p = Math.min(printT, 1);
     const stepped = ease(p) + Math.sin(p * 60) * 0.004 * (1 - p); // 프린터처럼 미세하게 끊기는 움직임
-    paper.position.set(0, slotWorldY + PAPER_H / 2 - PAPER_H * stepped, front + 0.03);
+    paper.position.set(0, slotWorldY - PAPER_H / 2 + PAPER_H * stepped, OUT_Z);
     if (p >= 1) setTimeout(() => { if (state === 'printed') startRise(); }, 350), state = 'printed';
   } else if (state === 'rising') {
     riseT += dt / 1.1;
     const p = Math.min(riseT, 1), e = 1 - Math.pow(1 - p, 4);
     paper.position.lerpVectors(rise.from, rise.to, e);
-    paper.position.z += Math.sin(p * Math.PI) * 1.2; // 살짝 떠오르는 궤적
-    paper.quaternion.slerpQuaternions(rise.fromQ, new THREE.Quaternion(), e);
+    paper.position.y += Math.sin(p * Math.PI) * 1.0; // 살짝 떠오르는 궤적
+    paper.quaternion.slerpQuaternions(rise.fromQ, rise.toQ, e);
     paper.scale.setScalar(rise.fromS + (rise.toS - rise.fromS) * e);
     dim.material.opacity = 0.62 * e;
     if (p >= 1) state = 'shown';
@@ -516,8 +581,8 @@ function tick() {
     if (p >= 1) { state = 'idle'; resetPaper(); paper.visible = false; dim.material.opacity = 0; }
   }
   // 잘라 내는 평면을 출력구 높이에 맞춤 (월드 좌표)
-  const slotW = new THREE.Vector3(0, slotWorldY, front).applyMatrix4(tx.matrixWorld);
-  clip.constant = slotW.y;
+  const slotW = new THREE.Vector3(0, slotWorldY, OUT_Z).applyMatrix4(tx.matrixWorld);
+  clip.constant = -slotW.y;
 
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
