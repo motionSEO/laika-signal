@@ -31,6 +31,7 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /* =========================================================
    1. 데이터 — 여기만 고치면 됩니다
@@ -174,57 +175,32 @@ table.rotation.x = -Math.PI / 2; table.receiveShadow = true; scene.add(table);
   ao.rotation.x = -Math.PI / 2; ao.position.set(0, 0.002, 0.1); scene.add(ao);
 }
 
-/* 송신기 — 흰색 영수증 프린터 */
+/* 송신기 — Blender 에서 만든 레트로 영수증 프린터 (assets/laika_printer.glb) */
 const tx = new THREE.Group(); scene.add(tx);
 const clickables = [];
-const plastic = new THREE.MeshStandardMaterial({ color: 0xebe8e1, roughness: 0.5, metalness: 0.0 });
-const plasticDark = new THREE.MeshStandardMaterial({ color: 0xdcd8cf, roughness: 0.6 });
-const recess = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 });
-const panelMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.35, metalness: 0.2 });
-
-function part(geo, mat, x, y, z) {
-  const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z);
-  m.castShadow = true; m.receiveShadow = true; tx.add(m); clickables.push(m); return m;
-}
-// 받침
-part(new RoundedBoxGeometry(3.0, 0.24, 3.6, 4, 0.06), plasticDark, 0, 0.12, 0.15);
-// 아래 몸체
-part(new RoundedBoxGeometry(2.6, 1.15, 3.0, 6, 0.12), plastic, 0, 0.24 + 0.575, -0.05);
-// 뒤쪽 둥근 용지 덮개
-const hood = part(new THREE.CylinderGeometry(0.8, 0.8, 2.36, 64), plastic, 0, 1.39, -0.75);
-hood.rotation.z = Math.PI / 2; // 가로로 누운 원통, 아래 절반은 몸체 안에 묻힘
-part(new RoundedBoxGeometry(2.36, 0.12, 1.6, 3, 0.05), plastic, 0, 1.42, -0.75); // 덮개 아래 이음
-// 앞쪽 출력 블록
-const FRONT_TOP = 2.12;
-part(new RoundedBoxGeometry(2.3, 0.78, 1.5, 6, 0.1), plastic, 0, FRONT_TOP - 0.39, 0.55);
-// 오른쪽 위 손잡이 고리
-const loop = part(new THREE.TorusGeometry(0.26, 0.05, 12, 40, Math.PI), plastic, 1.2, 1.55, -0.15);
-loop.rotation.y = Math.PI / 2;
-
-// 송신 — 카드를 넣는 곳 (덮개 위)
-const IN_Y = 2.19;
-part(new RoundedBoxGeometry(1.5, 0.06, 0.14, 2, 0.03), recess, 0, IN_Y, -0.75);
-// 수신 — 기록지가 나오는 곳 (앞 블록 위)
-const OUT_Y = FRONT_TOP + 0.005, OUT_Z = 0.95;
-part(new RoundedBoxGeometry(1.75, 0.04, 0.12, 2, 0.02), recess, 0, OUT_Y, OUT_Z);
-
-// 앞면 아래 조작부 + 표시등
-part(new RoundedBoxGeometry(0.78, 0.42, 0.06, 3, 0.03), panelMat, 0.78, 0.62, 1.47);
+const PRINTER_SCALE = 3.0;                       // 모델 단위(약 1m 폭) → 장면 크기
+const OUT_Y = 0.469 * PRINTER_SCALE;             // 수신 슬롯 윗면 높이
+const OUT_Z = 0.30 * PRINTER_SCALE;              // 수신 슬롯 앞뒤 위치
 const ledMat = (c, e) => new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: e, roughness: 0.3 });
-const ledG1 = part(new THREE.SphereGeometry(0.035, 16, 16), ledMat(0x37d067, 1.2), 0.58, 0.72, 1.51);
-const ledG2 = part(new THREE.SphereGeometry(0.035, 16, 16), ledMat(0x37d067, 0.25), 0.72, 0.72, 1.51);
-const lamp = part(new THREE.SphereGeometry(0.06, 20, 20), ledMat(ORANGE, 0.4), 0.98, 0.72, 1.52);
-const lampLight = new THREE.PointLight(ORANGE, 0, 1.6); lampLight.position.set(0.98, 0.72, 1.7); tx.add(lampLight);
+const lamp = { material: ledMat(ORANGE, 0.2) };      // 송신 표시등 (LED_Signal)
+const ledG2 = { material: ledMat(0x37d067, 1.0) };   // 초록 표시등 (LED_Green)
+const lampLight = new THREE.PointLight(ORANGE, 0, 1.6);
+lampLight.position.set(0.98, 0.51, 2.1); tx.add(lampLight);
 const lampGlow = { material: { opacity: 0 } }; // 이전 코드 호환용
-// 뒤쪽 전원선
-{
-  const curve = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(-1.0, 0.5, -1.55), new THREE.Vector3(-1.2, 0.25, -2.1),
-    new THREE.Vector3(-2.0, 0.05, -2.4), new THREE.Vector3(-4.5, 0.05, -2.0)]);
-  const cable = new THREE.Mesh(new THREE.TubeGeometry(curve, 40, 0.045, 8),
-    new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.5 }));
-  cable.castShadow = true; tx.add(cable);
-}
+
+new GLTFLoader().load('assets/laika_printer.glb', gltf => {
+  const model = gltf.scene;
+  model.scale.setScalar(PRINTER_SCALE);
+  model.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = true; o.receiveShadow = true;
+    clickables.push(o);
+    if (/LED_Signal/.test(o.name)) o.material = lamp.material;
+    else if (/LED_Green/.test(o.name)) o.material = ledG2.material;
+    else if (o.material && o.material.roughness !== undefined) o.material.envMapIntensity = 0.9;
+  });
+  tx.add(model);
+}, undefined, e => console.warn('프린터 모델을 불러오지 못했습니다:', e));
 const body = { isPrinter: true }; // 클릭 판정은 clickables 로
 
 /* 기록지 */
