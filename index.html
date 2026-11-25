@@ -415,7 +415,8 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
 
   // 기대의 결 (퍼센티지)
   c.font = '600 26px Pretendard, sans-serif'; c.fillText(weak ? '기대의 결 · 신호가 약해 고르게 나눴어요' : '기대의 결', P, y); y += 50;
-  const sorted = EMO_KEYS.slice().sort((a, b) => pct[b] - pct[a]);
+  // 반올림해서 0% 인 감정 결은 그리지 않음
+  const sorted = EMO_KEYS.slice().sort((a, b) => pct[b] - pct[a]).filter(k => Math.round(pct[k] * 100) > 0);
   for (const k of sorted) {
     const v = pct[k], barX = P + 118, barW = W - P * 2 - 118 - 86;
     c.font = '500 26px Pretendard, sans-serif'; c.fillStyle = '#171717'; c.fillText(k, P, y);
@@ -424,11 +425,7 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
     c.fillStyle = '#171717'; c.textAlign = 'right'; c.fillText(Math.round(v * 100) + '%', W - P, y); c.textAlign = 'left';
     y += 46;
   }
-  y += 24; dashed(c, y, W, P); y += 44;
-
-  c.font = '500 28px Pretendard, sans-serif';
-  const josa = hasJong(FILM) ? '을' : '를';
-  for (const l of wrap(c, `이번 주 ${FILM}${josa} 기다린 사람들은 ${together}`, W - P * 2)) { c.fillText(l, P, y); y += 42; }
+  y += 4;
 
   // 내용이 있는 만큼만 기록지로 잘라 씀
   const used = Math.min(H, y + 56);
