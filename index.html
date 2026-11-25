@@ -238,7 +238,7 @@ const body = { isPrinter: true }; // 클릭 판정은 clickables 로
 /* 기록지 */
 const PAPER_W = 1.55;
 let PAPER_H = 2.6; // 기록지 내용 길이에 맞춰 다시 계산됨
-const paperCanvas = document.createElement('canvas'); paperCanvas.width = 640; paperCanvas.height = 1768;
+const paperCanvas = document.createElement('canvas'); paperCanvas.width = 640; paperCanvas.height = 2400;
 const paperTex = new THREE.CanvasTexture(paperCanvas); paperTex.colorSpace = THREE.SRGBColorSpace;
 paperTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
 const clip = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0); // 출력구 아래는 잘라 냄
@@ -384,8 +384,25 @@ function wrap(ctx, text, maxW) {
   return lines;
 }
 
+// 대사 아래에 함께 찍히는 장면 (감정 결마다 한 장, 없으면 생략)
+const STILL_SRC = {
+  그리움: 'assets/stills/longing.jpg',
+  쉼: 'assets/stills/rest.jpg',
+  위로: 'assets/stills/comfort.jpg',
+  영감: 'assets/stills/inspiration.jpg',
+  용기: 'assets/stills/courage.jpg',
+  // 설렘: 'assets/stills/flutter.jpg',
+};
+const STILLS = {};
+const stillsReady = Promise.all(Object.entries(STILL_SRC).map(([k, src]) => new Promise(res => {
+  const im = new Image();
+  im.onload = () => { STILLS[k] = im; res(); };
+  im.onerror = () => res();
+  im.src = src;
+})));
+
 function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
-  const c = paperCanvas.getContext('2d'), W = 640, H = 1768, P = 52;
+  const c = paperCanvas.getContext('2d'), W = 640, H = 2400, P = 52;
   c.clearRect(0, 0, W, H);
   c.fillStyle = '#F2F2F2'; c.fillRect(0, 0, W, H);
   c.fillStyle = '#171717'; c.textBaseline = 'top';
@@ -407,6 +424,12 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
 
   c.fillStyle = '#FF742F'; c.font = '600 46px Pretendard, sans-serif';
   for (const l of wrap(c, `“${dialogue.text}”`, W - P * 2)) { c.fillText(l, P, y); y += 64; }
+  // 대사에 맞는 장면
+  const still = STILLS[Object.keys(dialogue.tags)[0]];
+  if (still) {
+    const iw = W - P * 2, ih = Math.round(iw * still.naturalHeight / still.naturalWidth);
+    y += 14; c.drawImage(still, P, y, iw, ih); y += ih;
+  }
   y += 36; c.fillStyle = '#171717'; dashed(c, y, W, P); y += 44;
 
   c.font = '500 28px Pretendard, sans-serif';
@@ -577,6 +600,7 @@ async function send(manualText) {
   const together = Object.keys(h.sum).length ? weave(h.sum) : weave(pct);
 
   await document.fonts.ready;
+  await stillsReady;
   drawReceipt({ no: h.n, wish, pct, dialogue, together, weak, via });
   setTimeout(() => { resetPaper(); state = 'printing'; printT = 0; paper.visible = true; }, 600);
 }
