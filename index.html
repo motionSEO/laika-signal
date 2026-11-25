@@ -410,7 +410,7 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
   const now = new Date(), pad = n => String(n).padStart(2, '0');
 
   c.font = '600 30px Pretendard, sans-serif'; c.textAlign = 'left'; c.fillText('LAIKA CINEMA', P, y);
-  c.font = '500 30px Pretendard, sans-serif'; c.textAlign = 'right'; c.fillText('No. ' + String(no).padStart(4, '0'), W - P, y);
+  c.font = '500 30px Pretendard, sans-serif'; c.textAlign = 'right'; c.fillText(no ? 'No. ' + String(no).padStart(4, '0') : 'NO SIGNAL', W - P, y);
   c.textAlign = 'left'; y += 56;
   c.font = '500 26px Pretendard, sans-serif';
   c.fillText(`SIGNAL RECEIVED · ${pad(now.getMonth() + 1)}.${pad(now.getDate())} · ${pad(now.getHours())}:${pad(now.getMinutes())}`, P, y);
@@ -419,6 +419,16 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
   c.fillText(via === 'gemini' ? 'READ BY GEMINI' : via === 'manual' ? 'READ BY KEYBOARD' : 'READ BY BROWSER OCR', P, y);
   c.fillStyle = '#171717';
   y += 44; dashed(c, y, W, P); y += 44;
+
+  // 글씨를 읽지 못했을 때: 감정 결을 지어내지 않고 다시 시도 안내만
+  if (weak) {
+    c.font = '600 40px Pretendard, sans-serif'; c.fillText(`[${FILM}]`, P, y); y += 80;
+    c.fillStyle = '#FF742F'; c.font = '600 46px Pretendard, sans-serif';
+    for (const l of wrap(c, '텍스트를 인식하지 못했어요.', W - P * 2)) { c.fillText(l, P, y); y += 64; }
+    y += 30; c.fillStyle = '#171717'; c.font = '500 28px Pretendard, sans-serif';
+    for (const l of wrap(c, '카드를 안내선 안에 반듯하게 맞추고, 글씨가 잘 보이도록 다시 송신해 주세요.', W - P * 2)) { c.fillText(l, P, y); y += 42; }
+    return fitPaper(y + 30);
+  }
 
   c.font = '600 40px Pretendard, sans-serif'; c.fillText(`[${FILM}]`, P, y); y += 80;
 
@@ -446,7 +456,7 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
   y += 30;
 
   // 기대의 결 (퍼센티지)
-  c.font = '600 26px Pretendard, sans-serif'; c.fillText(weak ? '기대의 결 · 신호가 약해 고르게 나눴어요' : '기대의 결', P, y); y += 50;
+  c.font = '600 26px Pretendard, sans-serif'; c.fillText('기대의 결', P, y); y += 50;
   // 반올림해서 0% 인 감정 결은 그리지 않음
   const sorted = EMO_KEYS.slice().sort((a, b) => pct[b] - pct[a]).filter(k => Math.round(pct[k] * 100) > 0);
   for (const k of sorted) {
@@ -457,9 +467,11 @@ function drawReceipt({ no, wish, pct, dialogue, together, weak, via }) {
     c.fillStyle = '#171717'; c.textAlign = 'right'; c.fillText(Math.round(v * 100) + '%', W - P, y); c.textAlign = 'left';
     y += 46;
   }
-  y += 4;
-
-  // 내용이 있는 만큼만 기록지로 잘라 씀
+  fitPaper(y + 4);
+}
+// 내용이 있는 만큼만 기록지로 잘라 씀
+function fitPaper(y) {
+  const W = paperCanvas.width, H = paperCanvas.height;
   const used = Math.min(H, y + 56);
   paperTex.repeat.set(1, used / H);
   paperTex.offset.set(0, 1 - used / H);
@@ -601,16 +613,20 @@ async function send(manualText) {
 
   if (!pct) { wish = extractWish(text); ({ pct, weak } = analyze(wish)); }
   console.log(`[라이카 시그널] (${via}) 인식:`, JSON.stringify(text), '→', wish, pct);
-  const { dialogue } = pickDialogue(pct);
-
-  const h = loadHistory(); h.n += 1;
-  if (!weak) for (const k of EMO_KEYS) h.sum[k] = (h.sum[k] || 0) + pct[k];
-  saveHistory(h);
-  const together = Object.keys(h.sum).length ? weave(h.sum) : weave(pct);
-
   await document.fonts.ready;
   await stillsReady;
-  drawReceipt({ no: h.n, wish, pct, dialogue, together, weak, via });
+  if (weak) {
+    // 읽지 못한 카드는 번호를 매기지 않고, 다시 시도하라는 기록지만 출력
+    flashHint('텍스트를 인식하지 못했어요 — 카드를 다시 송신해 주세요');
+    drawReceipt({ no: 0, weak: true, via });
+  } else {
+    const { dialogue } = pickDialogue(pct);
+    const h = loadHistory(); h.n += 1;
+    for (const k of EMO_KEYS) h.sum[k] = (h.sum[k] || 0) + pct[k];
+    saveHistory(h);
+    const together = Object.keys(h.sum).length ? weave(h.sum) : weave(pct);
+    drawReceipt({ no: h.n, wish, pct, dialogue, together, weak, via });
+  }
   setTimeout(() => { resetPaper(); state = 'printing'; printT = 0; paper.visible = true; }, 600);
 }
 
